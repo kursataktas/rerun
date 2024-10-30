@@ -5,20 +5,23 @@ use std::sync::Weak;
 use std::sync::{atomic::AtomicI64, Arc};
 
 use ahash::HashMap;
+use arrow2::offset::Offsets;
 use crossbeam::channel::{Receiver, Sender};
 use itertools::Either;
 use parking_lot::Mutex;
 
 use arrow2::array::{ListArray as ArrowListArray, PrimitiveArray as ArrowPrimitiveArray};
-use re_chunk::{Chunk, ChunkBatcher, ChunkBatcherConfig, ChunkBatcherError, PendingRow, RowId};
+use re_chunk::{
+    Chunk, ChunkBatcher, ChunkBatcherConfig, ChunkBatcherError, ChunkComponents, PendingRow, RowId,
+};
 
-use re_chunk::{ChunkError, ChunkId, ComponentName, TimeColumn};
+use re_chunk::{ChunkError, ChunkId, TimeColumn};
 use re_log_types::{
     ApplicationId, ArrowChunkReleaseCallback, BlueprintActivationCommand, EntityPath, LogMsg,
     StoreId, StoreInfo, StoreKind, StoreSource, Time, TimeInt, TimePoint, TimeType, Timeline,
     TimelineName,
 };
-use re_types_core::{AsComponents, ComponentBatch, SerializationError};
+use re_types_core::{AsComponents, SerializationError};
 
 #[cfg(feature = "web_viewer")]
 use re_web_viewer_server::WebViewerServerPort;
@@ -310,24 +313,8 @@ impl RecordingStreamBuilder {
     /// let rec = re_sdk::RecordingStreamBuilder::new("rerun_example_app").connect()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[deprecated(since = "0.20.0", note = "use connect_tcp() instead")]
     pub fn connect(self) -> RecordingStreamResult<RecordingStream> {
-        self.connect_tcp()
-    }
-
-    /// Creates a new [`RecordingStream`] that is pre-configured to stream the data through to a
-    /// remote Rerun instance.
-    ///
-    /// See also [`Self::connect_opts`] if you wish to configure the TCP connection.
-    ///
-    /// ## Example
-    ///
-    /// ```no_run
-    /// let rec = re_sdk::RecordingStreamBuilder::new("rerun_example_app").connect_tcp()?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn connect_tcp(self) -> RecordingStreamResult<RecordingStream> {
-        self.connect_tcp_opts(crate::default_server_addr(), crate::default_flush_timeout())
+        self.connect_opts(crate::default_server_addr(), crate::default_flush_timeout())
     }
 
     /// Creates a new [`RecordingStream`] that is pre-configured to stream the data through to a
@@ -344,30 +331,7 @@ impl RecordingStreamBuilder {
     ///     .connect_opts(re_sdk::default_server_addr(), re_sdk::default_flush_timeout())?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[deprecated(since = "0.20.0", note = "use connect_tcp_opts() instead")]
     pub fn connect_opts(
-        self,
-        addr: std::net::SocketAddr,
-        flush_timeout: Option<std::time::Duration>,
-    ) -> RecordingStreamResult<RecordingStream> {
-        self.connect_tcp_opts(addr, flush_timeout)
-    }
-
-    /// Creates a new [`RecordingStream`] that is pre-configured to stream the data through to a
-    /// remote Rerun instance.
-    ///
-    /// `flush_timeout` is the minimum time the [`TcpSink`][`crate::log_sink::TcpSink`] will
-    /// wait during a flush before potentially dropping data. Note: Passing `None` here can cause a
-    /// call to `flush` to block indefinitely if a connection cannot be established.
-    ///
-    /// ## Example
-    ///
-    /// ```no_run
-    /// let rec = re_sdk::RecordingStreamBuilder::new("rerun_example_app")
-    ///     .connect_opts(re_sdk::default_server_addr(), re_sdk::default_flush_timeout())?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn connect_tcp_opts(
         self,
         addr: std::net::SocketAddr,
         flush_timeout: Option<std::time::Duration>,
@@ -387,10 +351,6 @@ impl RecordingStreamBuilder {
 
     /// Creates a new [`RecordingStream`] that is pre-configured to stream the data through to an
     /// RRD file on disk.
-    ///
-    /// The Rerun Viewer is able to read continuously from the resulting rrd file while it is being written.
-    /// However, depending on your OS and configuration, changes may not be immediately visible due to file caching.
-    /// This is a common issue on Windows and (to a lesser extent) on `MacOS`.
     ///
     /// ## Example
     ///
@@ -503,12 +463,12 @@ impl RecordingStreamBuilder {
         // NOTE: If `_RERUN_TEST_FORCE_SAVE` is set, all recording streams will write to disk no matter
         // what, thus spawning a viewer is pointless (and probably not intended).
         if forced_sink_path().is_some() {
-            return self.connect_tcp_opts(connect_addr, flush_timeout);
+            return self.connect_opts(connect_addr, flush_timeout);
         }
 
         crate::spawn(opts)?;
 
-        self.connect_tcp_opts(connect_addr, flush_timeout)
+        self.connect_opts(connect_addr, flush_timeout)
     }
 
     /// Creates a new [`RecordingStream`] that is pre-configured to stream the data through to a
@@ -542,56 +502,7 @@ impl RecordingStreamBuilder {
     //
     // # TODO(#5531): keep static data around.
     #[cfg(feature = "web_viewer")]
-    #[deprecated(since = "0.20.0", note = "use serve_web() instead")]
     pub fn serve(
-        self,
-        bind_ip: &str,
-        web_port: WebViewerServerPort,
-        ws_port: RerunServerPort,
-        server_memory_limit: re_memory::MemoryLimit,
-        open_browser: bool,
-    ) -> RecordingStreamResult<RecordingStream> {
-        self.serve_web(
-            bind_ip,
-            web_port,
-            ws_port,
-            server_memory_limit,
-            open_browser,
-        )
-    }
-
-    /// Creates a new [`RecordingStream`] that is pre-configured to stream the data through to a
-    /// web-based Rerun viewer via WebSockets.
-    ///
-    /// If the `open_browser` argument is `true`, your default browser will be opened with a
-    /// connected web-viewer.
-    ///
-    /// If not, you can connect to this server using the `rerun` binary (`cargo install rerun-cli --locked`).
-    ///
-    /// ## Details
-    /// This method will spawn two servers: one HTTPS server serving the Rerun Web Viewer `.html` and `.wasm` files,
-    /// and then one WebSocket server that streams the log data to the web viewer (or to a native viewer, or to multiple viewers).
-    ///
-    /// The WebSocket server will buffer all log data in memory so that late connecting viewers will get all the data.
-    /// You can limit the amount of data buffered by the WebSocket server with the `server_memory_limit` argument.
-    /// Once reached, the earliest logged data will be dropped.
-    /// Note that this means that static data may be dropped if logged early (see <https://github.com/rerun-io/rerun/issues/5531>).
-    ///
-    /// ## Example
-    ///
-    /// ```ignore
-    /// let rec = re_sdk::RecordingStreamBuilder::new("rerun_example_app")
-    ///     .serve_web("0.0.0.0",
-    ///                Default::default(),
-    ///                Default::default(),
-    ///                re_sdk::MemoryLimit::from_fraction_of_total(0.25),
-    ///                true)?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    //
-    // # TODO(#5531): keep static data around.
-    #[cfg(feature = "web_viewer")]
-    pub fn serve_web(
         self,
         bind_ip: &str,
         web_port: WebViewerServerPort,
@@ -944,8 +855,7 @@ impl RecordingStream {
     /// Log data to Rerun.
     ///
     /// This is the main entry point for logging data to rerun. It can be used to log anything
-    /// that implements the [`AsComponents`], such as any [archetype](https://docs.rs/rerun/latest/rerun/archetypes/index.html)
-    /// or individual [component](https://docs.rs/rerun/latest/rerun/components/index.html).
+    /// that implements the [`AsComponents`], such as any [archetype](https://docs.rs/rerun/latest/rerun/archetypes/index.html).
     ///
     /// The data will be timestamped automatically based on the [`RecordingStream`]'s internal clock.
     /// See [`RecordingStream::set_time_sequence`] etc for more information.
@@ -972,37 +882,29 @@ impl RecordingStream {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
-    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk/micro-batching
+    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk-micro-batching
     /// [component bundle]: [`AsComponents`]
     #[inline]
     pub fn log(
         &self,
         ent_path: impl Into<EntityPath>,
-        as_components: &impl AsComponents,
+        arch: &impl AsComponents,
     ) -> RecordingStreamResult<()> {
-        self.log_with_static(ent_path, false, as_components)
+        self.log_with_static(ent_path, false, arch)
     }
 
     /// Lower-level logging API to provide data spanning multiple timepoints.
     ///
     /// Unlike the regular `log` API, which is row-oriented, this API lets you submit the data
-    /// in a columnar form. The lengths of all of the [`TimeColumn`] and the component batches
+    /// in a columnar form. The lengths of all of the [`TimeColumn`] and the [`ArrowListArray`]s
     /// must match. All data that occurs at the same index across the different time and components
     /// arrays will act as a single logical row.
-    ///
-    /// Note that this API ignores any stateful time set on the log stream via the
-    /// [`Self::set_timepoint`]/[`Self::set_time_nanos`]/etc. APIs.
-    /// Furthermore, this will _not_ inject the default timelines `log_tick` and `log_time` timeline columns.
-    ///
-    /// TODO(#7167): Unlike Python and C++, this API does not yet support arbitrary partitions of the incoming
-    /// component arrays. Each component will be individually associated with a single timepoint, rather
-    /// than offering how big the component arrays are that are associated with each timepoint.
     #[inline]
-    pub fn send_columns<'a>(
+    pub fn log_temporal_batch<'a>(
         &self,
         ent_path: impl Into<EntityPath>,
         timelines: impl IntoIterator<Item = TimeColumn>,
-        components: impl IntoIterator<Item = &'a dyn ComponentBatch>,
+        components: impl IntoIterator<Item = &'a dyn re_types_core::ComponentBatch>,
     ) -> RecordingStreamResult<()> {
         let id = ChunkId::new();
 
@@ -1013,15 +915,61 @@ impl RecordingStream {
 
         let components: Result<Vec<_>, ChunkError> = components
             .into_iter()
-            .map(|batch| Ok((batch.name(), batch.to_arrow_list_array()?)))
+            .map(|batch| {
+                let array = batch.to_arrow()?;
+
+                let array = if let Some(array) =
+                    array.as_any().downcast_ref::<ArrowListArray<i32>>()
+                {
+                    array.clone()
+                } else {
+                    let offsets = Offsets::try_from_lengths(std::iter::repeat(1).take(array.len()))
+                        .map_err(|err| ChunkError::Malformed {
+                            reason: format!("Failed to create offsets: {err}"),
+                        })?;
+                    let data_type =
+                        ArrowListArray::<i32>::default_datatype(array.data_type().clone());
+                    ArrowListArray::<i32>::try_new(
+                        data_type,
+                        offsets.into(),
+                        array.to_boxed(),
+                        None,
+                    )
+                    .map_err(|err| ChunkError::Malformed {
+                        reason: format!("Failed to wrap in List array: {err}"),
+                    })?
+                };
+
+                Ok((batch.descriptor(), array))
+            })
             .collect();
 
-        let components: BTreeMap<ComponentName, ArrowListArray<i32>> =
-            components?.into_iter().collect();
+        let components: ChunkComponents = components?.into_iter().collect();
+
+        let mut all_lengths = timelines
+            .values()
+            .map(|timeline| (timeline.name(), timeline.num_rows()))
+            .chain(
+                components
+                    .iter()
+                    .map(|(component, array)| (component.as_str(), array.len())),
+            );
+
+        if let Some((_, expected)) = all_lengths.next() {
+            for (name, len) in all_lengths {
+                if len != expected {
+                    return Err(RecordingStreamError::Chunk(ChunkError::Malformed {
+                        reason: format!(
+                            "Mismatched lengths: '{name}' has length {len} but expected {expected}",
+                        ),
+                    }));
+                }
+            }
+        }
 
         let chunk = Chunk::from_auto_row_ids(id, ent_path.into(), timelines, components)?;
 
-        self.send_chunk(chunk);
+        self.record_chunk(chunk);
 
         Ok(())
     }
@@ -1040,8 +988,7 @@ impl RecordingStream {
     /// Log data to Rerun.
     ///
     /// It can be used to log anything
-    /// that implements the [`AsComponents`], such as any [archetype](https://docs.rs/rerun/latest/rerun/archetypes/index.html)
-    /// or individual [component](https://docs.rs/rerun/latest/rerun/components/index.html).
+    /// that implements the [`AsComponents`], such as any [archetype](https://docs.rs/rerun/latest/rerun/archetypes/index.html).
     ///
     /// Static data has no time associated with it, exists on all timelines, and unconditionally shadows
     /// any temporal data of the same type.
@@ -1056,15 +1003,15 @@ impl RecordingStream {
     ///
     /// See also [`Self::log`].
     ///
-    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk/micro-batching
+    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk-micro-batching
     /// [component bundle]: [`AsComponents`]
     #[inline]
     pub fn log_static(
         &self,
         ent_path: impl Into<EntityPath>,
-        as_components: &impl AsComponents,
+        arch: &impl AsComponents,
     ) -> RecordingStreamResult<()> {
-        self.log_with_static(ent_path, true, as_components)
+        self.log_with_static(ent_path, true, arch)
     }
 
     #[deprecated(since = "0.16.0", note = "use `log_static` instead")]
@@ -1099,24 +1046,23 @@ impl RecordingStream {
     /// transport.
     /// See [SDK Micro Batching] for more information.
     ///
-    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk/micro-batching
+    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk-micro-batching
     /// [component bundle]: [`AsComponents`]
     #[inline]
     pub fn log_with_static(
         &self,
         ent_path: impl Into<EntityPath>,
         static_: bool,
-        as_components: &impl AsComponents,
+        arch: &impl AsComponents,
     ) -> RecordingStreamResult<()> {
         let row_id = RowId::new(); // Create row-id as early as possible. It has a timestamp and is used to estimate e2e latency.
         self.log_component_batches_impl(
             row_id,
             ent_path,
             static_,
-            as_components
-                .as_component_batches()
+            arch.as_described_component_batches()
                 .iter()
-                .map(|any_comp_batch| any_comp_batch.as_ref()),
+                .map(|batch| batch as &dyn re_types_core::ComponentBatch),
         )
     }
 
@@ -1142,12 +1088,12 @@ impl RecordingStream {
     /// transport.
     /// See [SDK Micro Batching] for more information.
     ///
-    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk/micro-batching
+    /// [SDK Micro Batching]: https://www.rerun.io/docs/reference/sdk-micro-batching
     pub fn log_component_batches<'a>(
         &self,
         ent_path: impl Into<EntityPath>,
         static_: bool,
-        comp_batches: impl IntoIterator<Item = &'a dyn ComponentBatch>,
+        comp_batches: impl IntoIterator<Item = &'a dyn re_types_core::ComponentBatch>,
     ) -> RecordingStreamResult<()> {
         let row_id = RowId::new(); // Create row-id as early as possible. It has a timestamp and is used to estimate e2e latency.
         self.log_component_batches_impl(row_id, ent_path, static_, comp_batches)
@@ -1158,7 +1104,7 @@ impl RecordingStream {
         row_id: RowId,
         entity_path: impl Into<EntityPath>,
         static_: bool,
-        comp_batches: impl IntoIterator<Item = &'a dyn ComponentBatch>,
+        comp_batches: impl IntoIterator<Item = &'a dyn re_types_core::ComponentBatch>,
     ) -> RecordingStreamResult<()> {
         if !self.is_enabled() {
             return Ok(()); // silently drop the message
@@ -1171,10 +1117,12 @@ impl RecordingStream {
             .map(|comp_batch| {
                 comp_batch
                     .to_arrow()
-                    .map(|array| (comp_batch.name(), array))
+                    .map(|array| (comp_batch.descriptor(), array))
             })
             .collect();
         let components: BTreeMap<_, _> = comp_batches?.into_iter().collect();
+
+        dbg!(&components);
 
         // NOTE: The timepoint is irrelevant, the `RecordingStream` will overwrite it using its
         // internal clock.
@@ -1207,7 +1155,7 @@ impl RecordingStream {
         entity_path_prefix: Option<EntityPath>,
         static_: bool,
     ) -> RecordingStreamResult<()> {
-        self.log_file(filepath, None, entity_path_prefix, static_, true)
+        self.log_file(filepath, None, entity_path_prefix, static_)
     }
 
     /// Logs the given `contents` using all [`re_data_loader::DataLoader`]s available.
@@ -1226,12 +1174,9 @@ impl RecordingStream {
         entity_path_prefix: Option<EntityPath>,
         static_: bool,
     ) -> RecordingStreamResult<()> {
-        self.log_file(filepath, Some(contents), entity_path_prefix, static_, true)
+        self.log_file(filepath, Some(contents), entity_path_prefix, static_)
     }
 
-    /// If `prefer_current_recording` is set (which is always the case for now), the dataloader settings
-    /// will be configured as if the current SDK recording is the currently opened recording.
-    /// Most dataloaders prefer logging to the currently opened recording if one is set.
     #[cfg(feature = "data_loaders")]
     fn log_file(
         &self,
@@ -1239,7 +1184,6 @@ impl RecordingStream {
         contents: Option<std::borrow::Cow<'_, [u8]>>,
         entity_path_prefix: Option<EntityPath>,
         static_: bool,
-        prefer_current_recording: bool,
     ) -> RecordingStreamResult<()> {
         let Some(store_info) = self.store_info().clone() else {
             re_log::warn!("Ignored call to log_file() because RecordingStream has not been properly initialized");
@@ -1254,10 +1198,10 @@ impl RecordingStream {
             re_smart_channel::SmartChannelSource::File(filepath.into()),
         );
 
-        let mut settings = crate::DataLoaderSettings {
+        let settings = crate::DataLoaderSettings {
             application_id: Some(store_info.application_id.clone()),
             opened_application_id: None,
-            store_id: store_info.store_id.clone(),
+            store_id: store_info.store_id,
             opened_store_id: None,
             entity_path_prefix,
             timepoint: (!static_).then(|| {
@@ -1275,13 +1219,8 @@ impl RecordingStream {
                     now
                 })
                 .unwrap_or_default()
-            }),
+            }), // timepoint: self.time,
         };
-
-        if prefer_current_recording {
-            settings.opened_application_id = Some(store_info.application_id.clone());
-            settings.opened_store_id = Some(store_info.store_id);
-        }
 
         if let Some(contents) = contents {
             re_data_loader::load_from_file_contents(
@@ -1526,12 +1465,11 @@ impl RecordingStream {
         }
     }
 
-    /// Logs a single [`Chunk`].
+    /// Records a single [`Chunk`].
     ///
     /// Will inject `log_tick` and `log_time` timeline columns into the chunk.
-    /// If you don't want to inject these, use [`Self::send_chunk`] instead.
     #[inline]
-    pub fn log_chunk(&self, mut chunk: Chunk) {
+    pub fn record_chunk(&self, mut chunk: Chunk) {
         let f = move |inner: &RecordingStreamInner| {
             // TODO(cmc): Repeating these values is pretty wasteful. Would be nice to have a way of
             // indicating these are fixed across the whole chunk.
@@ -1545,9 +1483,9 @@ impl RecordingStream {
                 )
                 .to(time_timeline.datatype());
 
-                let time_column = TimeColumn::new(Some(true), time_timeline, repeated_time);
+                let time_chunk = TimeColumn::new(Some(true), time_timeline, repeated_time);
 
-                if let Err(err) = chunk.add_timeline(time_column) {
+                if let Err(err) = chunk.add_timeline(time_chunk) {
                     re_log::error!(
                         "Couldn't inject '{}' timeline into chunk (this is a bug in Rerun!): {}",
                         time_timeline.name(),
@@ -1585,7 +1523,7 @@ impl RecordingStream {
         };
 
         if self.with(f).is_none() {
-            re_log::warn_once!("Recording disabled - call to log_chunk() ignored");
+            re_log::warn_once!("Recording disabled - call to record_chunk() ignored");
         }
     }
 
@@ -2022,7 +1960,7 @@ impl ThreadInfo {
     fn with<R>(f: impl FnOnce(&mut Self) -> R) -> R {
         use std::cell::RefCell;
         thread_local! {
-            static THREAD_INFO: RefCell<Option<ThreadInfo>> = const { RefCell::new(None) };
+            static THREAD_INFO: RefCell<Option<ThreadInfo>> = RefCell::new(None);
         }
 
         THREAD_INFO.with(|thread_info| {
@@ -2527,7 +2465,7 @@ mod tests {
 
     fn example_rows(timeless: bool) -> Vec<PendingRow> {
         use re_log_types::example_components::{MyColor, MyLabel, MyPoint};
-        use re_types_core::Loggable as _;
+        use re_types_core::{Component as _, Loggable};
 
         let mut tick = 0i64;
         let mut timepoint = |frame_nr: i64| {
@@ -2547,21 +2485,20 @@ mod tests {
                 timepoint: timepoint(1),
                 components: [
                     (
-                        MyPoint::name(),
-                        <MyPoint as re_types_core::Loggable>::to_arrow([
+                        MyPoint::descriptor(),
+                        <MyPoint as Loggable>::to_arrow([
                             MyPoint::new(10.0, 10.0),
                             MyPoint::new(20.0, 20.0),
                         ])
                         .unwrap(),
                     ), //
                     (
-                        MyColor::name(),
-                        <MyColor as re_types_core::Loggable>::to_arrow([MyColor(0x8080_80FF)])
-                            .unwrap(),
+                        MyColor::descriptor(),
+                        <MyColor as Loggable>::to_arrow([MyColor(0x8080_80FF)]).unwrap(),
                     ), //
                     (
-                        MyLabel::name(),
-                        <MyLabel as re_types_core::Loggable>::to_arrow([] as [MyLabel; 0]).unwrap(),
+                        MyLabel::descriptor(),
+                        <MyLabel as Loggable>::to_arrow([] as [MyLabel; 0]).unwrap(),
                     ), //
                 ]
                 .into_iter()
@@ -2575,16 +2512,16 @@ mod tests {
                 timepoint: timepoint(1),
                 components: [
                     (
-                        MyPoint::name(),
-                        <MyPoint as re_types_core::Loggable>::to_arrow([] as [MyPoint; 0]).unwrap(),
+                        MyPoint::descriptor(),
+                        <MyPoint as Loggable>::to_arrow([] as [MyPoint; 0]).unwrap(),
                     ), //
                     (
-                        MyColor::name(),
-                        <MyColor as re_types_core::Loggable>::to_arrow([] as [MyColor; 0]).unwrap(),
+                        MyColor::descriptor(),
+                        <MyColor as Loggable>::to_arrow([] as [MyColor; 0]).unwrap(),
                     ), //
                     (
-                        MyLabel::name(),
-                        <MyLabel as re_types_core::Loggable>::to_arrow([] as [MyLabel; 0]).unwrap(),
+                        MyLabel::descriptor(),
+                        <MyLabel as Loggable>::to_arrow([] as [MyLabel; 0]).unwrap(),
                     ), //
                 ]
                 .into_iter()
@@ -2598,18 +2535,16 @@ mod tests {
                 timepoint: timepoint(1),
                 components: [
                     (
-                        MyPoint::name(),
-                        <MyPoint as re_types_core::Loggable>::to_arrow([] as [MyPoint; 0]).unwrap(),
+                        MyPoint::descriptor(),
+                        <MyPoint as Loggable>::to_arrow([] as [MyPoint; 0]).unwrap(),
                     ), //
                     (
-                        MyColor::name(),
-                        <MyColor as re_types_core::Loggable>::to_arrow([MyColor(0xFFFF_FFFF)])
-                            .unwrap(),
+                        MyColor::descriptor(),
+                        <MyColor as Loggable>::to_arrow([MyColor(0xFFFF_FFFF)]).unwrap(),
                     ), //
                     (
-                        MyLabel::name(),
-                        <MyLabel as re_types_core::Loggable>::to_arrow([MyLabel("hey".into())])
-                            .unwrap(),
+                        MyLabel::descriptor(),
+                        <MyLabel as Loggable>::to_arrow([MyLabel("hey".into())]).unwrap(),
                     ), //
                 ]
                 .into_iter()

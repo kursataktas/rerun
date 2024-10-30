@@ -22,10 +22,10 @@ use once_cell::sync::Lazy;
 
 use arrow_utils::arrow_array_from_c_ffi;
 use re_sdk::{
-    log::{Chunk, ChunkId, PendingRow, TimeColumn},
+    log::{Chunk, ChunkComponents, ChunkId, PendingRow, TimeColumn},
     time::TimeType,
-    ComponentName, EntityPath, RecordingStream, RecordingStreamBuilder, StoreKind, TimePoint,
-    Timeline,
+    ComponentDescriptor, ComponentName, EntityPath, RecordingStream, RecordingStreamBuilder,
+    StoreKind, TimePoint, Timeline,
 };
 use recording_streams::{recording_stream, RECORDING_STREAMS};
 
@@ -792,7 +792,7 @@ fn rr_recording_stream_log_impl(
             let component_type = component_type_registry.get(*component_type)?;
             let datatype = component_type.datatype.clone();
             let values = unsafe { arrow_array_from_c_ffi(array, datatype) }?;
-            components.insert(component_type.name, values);
+            components.insert(ComponentDescriptor::new(component_type.name), values);
         }
     }
 
@@ -985,13 +985,18 @@ fn rr_recording_stream_send_columns_impl(
             .collect::<Result<_, CError>>()?
     };
 
-    let chunk = Chunk::from_auto_row_ids(id, entity_path.into(), time_columns, components)
-        .map_err(|err| {
-            CError::new(
-                CErrorCode::RecordingStreamChunkValidationFailure,
-                &format!("Failed to create chunk: {err}"),
-            )
-        })?;
+    let chunk = Chunk::from_auto_row_ids(
+        id,
+        entity_path.into(),
+        time_columns,
+        components.into_iter().collect(),
+    )
+    .map_err(|err| {
+        CError::new(
+            CErrorCode::RecordingStreamChunkValidationFailure,
+            &format!("Failed to create chunk: {err}"),
+        )
+    })?;
 
     stream.send_chunk(chunk);
 

@@ -23,6 +23,7 @@ pub trait Loggable: 'static + Send + Sync + Clone + Sized + SizeBytes {
     type Name: std::fmt::Display;
 
     /// The fully-qualified name of this loggable, e.g. `rerun.datatypes.Vec2D`.
+    // TODO: this is the thing we want removed for phase 2
     fn name() -> Self::Name;
 
     /// The underlying [`arrow2::datatypes::DataType`], excluding datatype extensions.

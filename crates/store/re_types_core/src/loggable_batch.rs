@@ -1,4 +1,4 @@
-use crate::{Component, ComponentName, Loggable, SerializationResult};
+use crate::{Component, ComponentDescriptor, ComponentName, Loggable, SerializationResult};
 
 use arrow2::array::ListArray as ArrowListArray;
 
@@ -24,6 +24,7 @@ pub trait LoggableBatch {
     // type Loggable: Loggable;
 
     /// The fully-qualified name of this batch, e.g. `rerun.datatypes.Vec2D`.
+    // TODO: this is the thing we want removed for phase 2
     fn name(&self) -> Self::Name;
 
     /// Serializes the batch into an Arrow array.
@@ -44,7 +45,59 @@ pub trait ComponentBatch: LoggableBatch<Name = ComponentName> {
         ArrowListArray::<i32>::try_new(data_type, offsets.into(), array.to_boxed(), None)
             .map_err(|err| err.into())
     }
+
+    // TODO
+    #[inline]
+    fn descriptor(&self) -> ComponentDescriptor {
+        ComponentDescriptor::new(self.name())
+    }
 }
+
+// TODO
+pub struct MaybeOwnedComponentBatchWithDescriptor<'a> {
+    pub batch: MaybeOwnedComponentBatch<'a>,
+    pub descriptor: ComponentDescriptor,
+}
+
+impl<'a> LoggableBatch for MaybeOwnedComponentBatchWithDescriptor<'a> {
+    type Name = ComponentName;
+
+    #[inline]
+    fn name(&self) -> Self::Name {
+        self.batch.as_ref().name()
+    }
+
+    // TODO: huh?
+
+    // #[inline]
+    // fn num_instances(&self) -> usize {
+    //     self.batch.as_ref().num_instances()
+    // }
+    //
+    // #[inline]
+    // fn arrow_field(&self) -> arrow2::datatypes::Field {
+    //     self.batch.as_ref().arrow_field()
+    // }
+
+    #[inline]
+    fn to_arrow(&self) -> SerializationResult<Box<dyn ::arrow2::array::Array>> {
+        self.batch.as_ref().to_arrow()
+    }
+}
+
+impl<'a> ComponentBatch for MaybeOwnedComponentBatchWithDescriptor<'a> {
+    fn descriptor(&self) -> ComponentDescriptor {
+        self.descriptor.clone()
+    }
+}
+
+// TODO: NO!
+// impl<'a> AsRef<dyn ComponentBatch + 'a> for MaybeOwnedComponentBatchWithDescriptor<'a> {
+//     #[inline]
+//     fn as_ref(&self) -> &(dyn ComponentBatch + 'a) {
+//         self.batch.as_ref()
+//     }
+// }
 
 /// Holds either an owned [`ComponentBatch`] that lives on heap, or a reference to one.
 ///
