@@ -96,7 +96,7 @@ pub trait Archetype {
 
     // ---
 
-    // TODO
+    // TODO(cmc): these methods shouldn't have default bodies, but we need codegen for that.
 
     /// Returns all component descriptors that _must_ be provided by the user when constructing this archetype.
     fn required_component_descriptors() -> std::borrow::Cow<'static, [ComponentDescriptor]> {

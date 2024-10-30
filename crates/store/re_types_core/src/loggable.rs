@@ -93,7 +93,6 @@ pub trait Loggable: 'static + Send + Sync + Clone + Sized + SizeBytes {
 /// Any [`Loggable`] with a [`Loggable::Name`] set to [`ComponentName`] automatically implements
 /// [`Component`].
 pub trait Component: Loggable<Name = ComponentName> {
-    // TODO
     #[inline]
     fn descriptor() -> ComponentDescriptor {
         ComponentDescriptor::new(Self::name())
